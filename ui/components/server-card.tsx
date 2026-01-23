@@ -31,7 +31,7 @@ export function ServerCard({ server, onDelete, onPublish, onDeploy, onGateway, s
   const official = _meta?.['io.modelcontextprotocol.registry/official']
   
   // Extract metadata
-  const publisherMetadata = serverData._meta?.['io.modelcontextprotocol.registry/publisher-provided']?.['agentregistry.solo.io/metadata']
+  const publisherMetadata = serverData._meta?.['io.modelcontextprotocol.registry/publisher-provided']?.['aregistry.ai/metadata']
   const githubStars = publisherMetadata?.stars
   const identityData = publisherMetadata?.identity
 
