@@ -47,9 +47,6 @@ func TestPrometheusHandler(t *testing.T) {
 		Version: "2.0.0",
 	})
 	assert.NoError(t, err)
-	// Publish the server so it's visible via public endpoints
-	err = registryService.PublishServer(context.Background(), server.Server.Name, server.Server.Version)
-	assert.NoError(t, err)
 
 	cfg := testConfig
 	shutdownTelemetry, metrics, _ := telemetry.InitMetrics("dev")
@@ -61,7 +58,7 @@ func TestPrometheusHandler(t *testing.T) {
 		router.WithSkipPaths("/health", "/metrics", "/ping", "/docs"),
 	))
 	v0.RegisterHealthEndpoint(api, "/v0", cfg, metrics)
-	v0.RegisterServersEndpoints(api, "/v0", registryService, false)
+	v0.RegisterServersEndpoints(api, "/v0", registryService)
 
 	// Add /metrics for Prometheus metrics using promhttp
 	mux.Handle("/metrics", metrics.PrometheusHandler())

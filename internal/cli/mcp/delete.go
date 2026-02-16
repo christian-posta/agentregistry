@@ -36,13 +36,13 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("API client not initialized")
 	}
 
-	// Check if server is published
-	isPublished, err := isServerPublished(serverName, deleteVersion)
+	// Check if server exists in registry
+	exists, err := isServerPublished(serverName, deleteVersion)
 	if err != nil {
-		return fmt.Errorf("failed to check if server is published: %w", err)
+		return fmt.Errorf("failed to check if server exists: %w", err)
 	}
 
-	if !isPublished {
+	if !exists {
 		return fmt.Errorf("server %s version %s not found in registry", serverName, deleteVersion)
 	}
 

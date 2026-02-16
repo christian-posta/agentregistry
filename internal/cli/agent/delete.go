@@ -36,13 +36,13 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("API client not initialized")
 	}
 
-	// Check if agent exists
-	isPublished, err := isAgentPublished(agentName, deleteVersion)
+	// Check if agent exists in registry
+	exists, err := isAgentPublished(agentName, deleteVersion)
 	if err != nil {
 		return fmt.Errorf("failed to check if agent exists: %w", err)
 	}
 
-	if !isPublished {
+	if !exists {
 		return fmt.Errorf("agent %s version %s not found in registry", agentName, deleteVersion)
 	}
 
@@ -56,12 +56,13 @@ func runDelete(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// isAgentPublished checks if an agent exists in the registry (all entries are visible)
 func isAgentPublished(agentName, version string) (bool, error) {
 	if apiClient == nil {
 		return false, fmt.Errorf("API client not initialized")
 	}
 
-	agent, err := apiClient.GetAgentByNameAndVersionAdmin(agentName, version)
+	agent, err := apiClient.GetAgentByNameAndVersion(agentName, version)
 	if err != nil {
 		return false, err
 	}

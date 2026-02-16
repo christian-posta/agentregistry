@@ -10,14 +10,13 @@ import (
 	apiv0 "github.com/modelcontextprotocol/registry/pkg/api/v0"
 )
 
-// isServerPublished checks if a server is published
+// isServerPublished checks if a server exists in the registry (all entries are visible)
 func isServerPublished(serverName, version string) (bool, error) {
 	if apiClient == nil {
 		return false, errors.New("API client not initialized")
 	}
 
-	// GetServerByNameAndVersion with publishedOnly=true returns nil if not published
-	server, err := apiClient.GetServerByNameAndVersion(serverName, version, true)
+	server, err := apiClient.GetServerByNameAndVersion(serverName, version)
 	if err != nil {
 		return false, err
 	}
@@ -26,7 +25,6 @@ func isServerPublished(serverName, version string) (bool, error) {
 
 // selectServerVersion handles server version selection logic with interactive prompts
 // Returns the selected server or an error if not found or cancelled
-// Only allows deployment of published servers
 func selectServerVersion(resourceName, requestedVersion string, autoYes bool) (*apiv0.ServerResponse, error) {
 	if apiClient == nil {
 		return nil, errors.New("API client not initialized")
@@ -35,13 +33,12 @@ func selectServerVersion(resourceName, requestedVersion string, autoYes bool) (*
 	// If a specific version was requested, try to get that version
 	if requestedVersion != "" && requestedVersion != "latest" {
 		fmt.Printf("Checking if MCP server '%s' version '%s' exists in registry...\n", resourceName, requestedVersion)
-		// publishedOnly=true means we only get the server if it's published
-		server, err := apiClient.GetServerByNameAndVersion(resourceName, requestedVersion, true)
+		server, err := apiClient.GetServerByNameAndVersion(resourceName, requestedVersion)
 		if err != nil {
 			return nil, fmt.Errorf("error querying registry: %w", err)
 		}
 		if server == nil {
-			return nil, fmt.Errorf("published MCP server '%s' version '%s' not found in registry", resourceName, requestedVersion)
+			return nil, fmt.Errorf("MCP server '%s' version '%s' not found in registry", resourceName, requestedVersion)
 		}
 
 		fmt.Printf("✓ Found MCP server: %s (version %s)\n", server.Server.Name, server.Server.Version)
@@ -49,7 +46,7 @@ func selectServerVersion(resourceName, requestedVersion string, autoYes bool) (*
 	}
 
 	// No specific version requested, check all versions
-	fmt.Printf("Checking for published versions of MCP server '%s'...\n", resourceName)
+	fmt.Printf("Checking for versions of MCP server '%s'...\n", resourceName)
 	allVersions, err := apiClient.GetServerVersions(resourceName)
 	if err != nil {
 		return nil, fmt.Errorf("error querying registry: %w", err)
@@ -59,26 +56,10 @@ func selectServerVersion(resourceName, requestedVersion string, autoYes bool) (*
 		return nil, fmt.Errorf("MCP server '%s' not found in registry. Use 'arctl mcp list' to see available servers", resourceName)
 	}
 
-	// Filter to only published versions
-	var publishedVersions []*apiv0.ServerResponse
-	for _, v := range allVersions {
-		isPublished, err := isServerPublished(resourceName, v.Server.Version)
-		if err != nil {
-			return nil, fmt.Errorf("failed to check if server is published: %w", err)
-		}
-		if isPublished {
-			publishedVersions = append(publishedVersions, &v)
-		}
-	}
-
-	if len(publishedVersions) == 0 {
-		return nil, fmt.Errorf("no published versions found for MCP server '%s'. Use 'arctl mcp publish' to publish a version first", resourceName)
-	}
-
-	// If there are multiple published versions, prompt the user (unless --yes is set)
-	if len(publishedVersions) > 1 {
-		fmt.Printf("✓ Found %d published version(s) of MCP server '%s':\n", len(publishedVersions), resourceName)
-		for i, v := range publishedVersions {
+	// If there are multiple versions, prompt the user (unless --yes is set)
+	if len(allVersions) > 1 {
+		fmt.Printf("✓ Found %d version(s) of MCP server '%s':\n", len(allVersions), resourceName)
+		for i, v := range allVersions {
 			marker := ""
 			if i == 0 {
 				marker = " (latest)"
@@ -88,7 +69,6 @@ func selectServerVersion(resourceName, requestedVersion string, autoYes bool) (*
 
 		// Skip prompt if --yes flag is set
 		if !autoYes {
-			// Prompt user for confirmation
 			reader := bufio.NewReader(os.Stdin)
 			fmt.Print("Proceed with the latest version? [Y/n]: ")
 			response, err := reader.ReadString('\n')
@@ -101,12 +81,11 @@ func selectServerVersion(resourceName, requestedVersion string, autoYes bool) (*
 				return nil, fmt.Errorf("operation cancelled. To use a specific version, use: --version <version>")
 			}
 		} else {
-			fmt.Println("Auto-accepting latest published version (--yes flag set)")
+			fmt.Println("Auto-accepting latest version (--yes flag set)")
 		}
 	} else {
-		// Only one published version available
-		fmt.Printf("✓ Found published MCP server: %s (version %s)\n", publishedVersions[0].Server.Name, publishedVersions[0].Server.Version)
+		fmt.Printf("✓ Found MCP server: %s (version %s)\n", allVersions[0].Server.Name, allVersions[0].Server.Version)
 	}
 
-	return publishedVersions[0], nil
+	return &allVersions[0], nil
 }
