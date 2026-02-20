@@ -31,6 +31,20 @@ func (v *AgentManifestValidator) Validate(m *models.AgentManifest) error {
 			return err
 		}
 	}
+
+	for i, skill := range m.Skills {
+		if skill.Name == "" {
+			return fmt.Errorf("skills[%d]: name is required", i)
+		}
+		hasImage := skill.Image != ""
+		hasRegistry := skill.RegistrySkillName != ""
+		if !hasImage && !hasRegistry {
+			return fmt.Errorf("skills[%d]: one of image or registrySkillName is required", i)
+		}
+		if hasImage && hasRegistry {
+			return fmt.Errorf("skills[%d]: only one of image or registrySkillName may be set", i)
+		}
+	}
 	return nil
 }
 
