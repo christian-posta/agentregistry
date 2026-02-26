@@ -24,7 +24,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const maxServerVersionsPerServer = 10000
+const (
+	maxServerVersionsPerServer = 10000
+
+	localProviderID      = "local"
+	kubernetesProviderID = "kubernetes-default"
+	platformLocal        = "local"
+	platformKubernetes   = "kubernetes"
+	resourceTypeMCP      = "mcp"
+	resourceTypeAgent    = "agent"
+	originDiscovered     = "discovered"
+)
 
 // registryServiceImpl implements the RegistryService interface using our Database
 // It also implements the Reconciler interface for server-side container management
@@ -32,6 +42,12 @@ type registryServiceImpl struct {
 	db                 database.Database
 	cfg                *config.Config
 	embeddingsProvider embeddings.Provider
+	deploymentAdapters map[string]DeploymentPlatformDeployer
+}
+
+// DeploymentPlatformDeployer is the minimal deployment delegation contract needed by reconcile.
+type DeploymentPlatformDeployer interface {
+	Deploy(ctx context.Context, req *models.Deployment) (*models.Deployment, error)
 }
 
 // NewRegistryService creates a new registry service with the provided database and configuration
@@ -45,6 +61,13 @@ func NewRegistryService(
 		cfg:                cfg,
 		embeddingsProvider: embeddingProvider,
 	}
+}
+
+// SetPlatformAdapters wires platform extension adapters into the service.
+func (s *registryServiceImpl) SetPlatformAdapters(
+	deploymentPlatforms map[string]DeploymentPlatformDeployer,
+) {
+	s.deploymentAdapters = deploymentPlatforms
 }
 
 // shouldGenerateEmbeddingsOnPublish returns true if embeddings should be generated when resources are created.
@@ -640,62 +663,115 @@ func (s *registryServiceImpl) GetAgentEmbeddingMetadata(ctx context.Context, age
 	return s.db.GetAgentEmbeddingMetadata(ctx, nil, agentName, version)
 }
 
+// ListProviders lists providers, optionally filtered by platform.
+func (s *registryServiceImpl) ListProviders(ctx context.Context, platform *string) ([]*models.Provider, error) {
+	return s.db.ListProviders(ctx, nil, platform)
+}
+
+// GetProviderByID gets a provider by ID.
+func (s *registryServiceImpl) GetProviderByID(ctx context.Context, providerID string) (*models.Provider, error) {
+	return s.db.GetProviderByID(ctx, nil, providerID)
+}
+
+// CreateProvider creates a provider.
+func (s *registryServiceImpl) CreateProvider(ctx context.Context, in *models.CreateProviderInput) (*models.Provider, error) {
+	return s.db.CreateProvider(ctx, nil, in)
+}
+
+// UpdateProvider updates mutable provider fields.
+func (s *registryServiceImpl) UpdateProvider(ctx context.Context, providerID string, in *models.UpdateProviderInput) (*models.Provider, error) {
+	return s.db.UpdateProvider(ctx, nil, providerID, in)
+}
+
+// DeleteProvider removes a provider by ID.
+func (s *registryServiceImpl) DeleteProvider(ctx context.Context, providerID string) error {
+	return s.db.DeleteProvider(ctx, nil, providerID)
+}
+
+func shouldIncludeKubernetesDeployments(filter *models.DeploymentFilter) bool {
+	if filter == nil {
+		return true
+	}
+	if filter.Platform == nil {
+		return true
+	}
+	return *filter.Platform == platformKubernetes
+}
+
+func matchesKubernetesDeploymentFilter(filter *models.DeploymentFilter, dep *models.Deployment) bool {
+	if filter == nil {
+		return true
+	}
+	if filter.ResourceType != nil && dep.ResourceType != *filter.ResourceType {
+		return false
+	}
+	if filter.Status != nil && dep.Status != *filter.Status {
+		return false
+	}
+	if filter.ResourceName != nil && !strings.Contains(strings.ToLower(dep.ServerName), strings.ToLower(*filter.ResourceName)) {
+		return false
+	}
+	return true
+}
+
+func (s *registryServiceImpl) appendExternalKubernetesDeployments(ctx context.Context, deployments []*models.Deployment, filter *models.DeploymentFilter) []*models.Deployment {
+	k8sResources, err := s.listKubernetesDeployments(ctx, "")
+	if err != nil {
+		log.Printf("Warning: Failed to list kubernetes deployments: %v", err)
+		return deployments
+	}
+
+	for _, k8sDep := range k8sResources {
+		// Skip internal resources, they are covered in the DB
+		if !k8sDep.IsExternal {
+			continue
+		}
+		if !matchesKubernetesDeploymentFilter(filter, k8sDep) {
+			continue
+		}
+		deployments = append(deployments, k8sDep)
+	}
+	return deployments
+}
+
 // GetDeployments retrieves all deployed servers with optional filtering
 func (s *registryServiceImpl) GetDeployments(ctx context.Context, filter *models.DeploymentFilter) ([]*models.Deployment, error) {
 	// Get managed deployments from DB
-	dbDeployments, err := s.db.GetDeployments(ctx, nil)
+	dbDeployments, err := s.db.GetDeployments(ctx, nil, filter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get deployments from DB: %w", err)
 	}
 
-	// Filter DB deployments based on request
 	var deployments []*models.Deployment
-	for _, d := range dbDeployments {
-		if filter != nil {
-			if filter.Runtime != nil && d.Runtime != *filter.Runtime {
-				continue
-			}
-			if filter.ResourceType != nil && d.ResourceType != *filter.ResourceType {
-				continue
-			}
-		}
-		deployments = append(deployments, d)
-	}
+	deployments = append(deployments, dbDeployments...)
 
-	// If runtime filter includes kubernetes (or no filter i.e. default), fetch from K8s
-	includeK8s := filter == nil || filter.Runtime == nil || *filter.Runtime == "kubernetes"
-	if includeK8s { //nolint:nestif
-		// Use empty namespace to list all (or default)
-		k8sResources, err := s.listKubernetesDeployments(ctx, "")
-		if err != nil {
-			log.Printf("Warning: Failed to list kubernetes deployments: %v", err)
-		} else {
-			for _, k8sDep := range k8sResources {
-				// Skip internal resources, they are covered in the DB
-				if !k8sDep.IsExternal {
-					continue
-				}
-
-				// Apply ResourceType filter to K8s resources
-				if filter != nil && filter.ResourceType != nil && k8sDep.ResourceType != *filter.ResourceType {
-					continue
-				}
-
-				deployments = append(deployments, k8sDep)
-			}
-		}
+	if shouldIncludeKubernetesDeployments(filter) {
+		deployments = s.appendExternalKubernetesDeployments(ctx, deployments, filter)
 	}
 
 	return deployments, nil
 }
 
-// GetDeploymentByName retrieves a specific deployment
-func (s *registryServiceImpl) GetDeploymentByNameAndVersion(ctx context.Context, serverName string, version string, artifactType string) (*models.Deployment, error) {
-	return s.db.GetDeploymentByNameAndVersion(ctx, nil, serverName, version, artifactType)
+// GetDeploymentByID retrieves a specific deployment by UUID.
+func (s *registryServiceImpl) GetDeploymentByID(ctx context.Context, id string) (*models.Deployment, error) {
+	return s.db.GetDeploymentByID(ctx, nil, id)
+}
+
+func (s *registryServiceImpl) resolveProviderByID(ctx context.Context, providerID string) (*models.Provider, error) {
+	if strings.TrimSpace(providerID) == "" {
+		return nil, fmt.Errorf("%w: provider id is required", database.ErrInvalidInput)
+	}
+	return s.db.GetProviderByID(ctx, nil, providerID)
 }
 
 // DeployServer deploys a server with configuration
-func (s *registryServiceImpl) DeployServer(ctx context.Context, serverName, version string, config map[string]string, preferRemote bool, runtimeTarget string) (*models.Deployment, error) {
+func (s *registryServiceImpl) DeployServer(ctx context.Context, serverName, version string, config map[string]string, preferRemote bool, providerID string) (*models.Deployment, error) {
+	if providerID == "" {
+		providerID = localProviderID
+	}
+	if _, err := s.resolveProviderByID(ctx, providerID); err != nil {
+		return nil, err
+	}
 	serverResp, err := s.db.GetServerByNameAndVersion(ctx, nil, serverName, version)
 	if err != nil {
 		if errors.Is(err, database.ErrNotFound) {
@@ -707,11 +783,12 @@ func (s *registryServiceImpl) DeployServer(ctx context.Context, serverName, vers
 	deployment := &models.Deployment{
 		ServerName:   serverName,
 		Version:      serverResp.Server.Version,
-		Status:       "active",
+		Status:       "deployed",
 		Config:       config,
 		PreferRemote: preferRemote,
-		ResourceType: "mcp",
-		Runtime:      runtimeTarget,
+		ResourceType: resourceTypeMCP,
+		ProviderID:   providerID,
+		Origin:       "managed",
 		DeployedAt:   time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -727,18 +804,28 @@ func (s *registryServiceImpl) DeployServer(ctx context.Context, serverName, vers
 	}
 
 	if err := s.ReconcileAll(ctx); err != nil {
-		if cleanupErr := s.db.RemoveDeployment(ctx, nil, serverName, version, "mcp"); cleanupErr != nil {
-			return nil, fmt.Errorf("deployment created but reconciliation failed: %v (cleanup failed: %v)", err, cleanupErr)
+		if deployment.ID != "" {
+			if cleanupErr := s.db.RemoveDeploymentByID(ctx, nil, deployment.ID); cleanupErr != nil {
+				return nil, fmt.Errorf("deployment created but reconciliation failed: %v (cleanup failed: %v)", err, cleanupErr)
+			}
+		} else {
+			return nil, fmt.Errorf("deployment created but reconciliation failed: %v (cleanup skipped: deployment id missing)", err)
 		}
 		return nil, fmt.Errorf("deployment created but reconciliation failed: %w", err)
 	}
 
 	// Return the created deployment
-	return s.db.GetDeploymentByNameAndVersion(ctx, nil, serverName, version, "mcp")
+	return s.db.GetDeploymentByID(ctx, nil, deployment.ID)
 }
 
 // DeployAgent deploys an agent with configuration
-func (s *registryServiceImpl) DeployAgent(ctx context.Context, agentName, version string, config map[string]string, preferRemote bool, runtimeTarget string) (*models.Deployment, error) {
+func (s *registryServiceImpl) DeployAgent(ctx context.Context, agentName, version string, config map[string]string, preferRemote bool, providerID string) (*models.Deployment, error) {
+	if providerID == "" {
+		providerID = localProviderID
+	}
+	if _, err := s.resolveProviderByID(ctx, providerID); err != nil {
+		return nil, err
+	}
 	agentResp, err := s.db.GetAgentByNameAndVersion(ctx, nil, agentName, version)
 	if err != nil {
 		if errors.Is(err, database.ErrNotFound) {
@@ -750,11 +837,12 @@ func (s *registryServiceImpl) DeployAgent(ctx context.Context, agentName, versio
 	deployment := &models.Deployment{
 		ServerName:   agentName,
 		Version:      agentResp.Agent.Version,
-		Status:       "active",
+		Status:       "deployed",
 		Config:       config,
 		PreferRemote: preferRemote,
-		ResourceType: "agent",
-		Runtime:      runtimeTarget,
+		ResourceType: resourceTypeAgent,
+		ProviderID:   providerID,
+		Origin:       "managed",
 		DeployedAt:   time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -778,11 +866,12 @@ func (s *registryServiceImpl) DeployAgent(ctx context.Context, agentName, versio
 			mcpDeployment := &models.Deployment{
 				ServerName:   serverReq.RegistryServer.Name,
 				Version:      serverReq.RegistryServer.Version,
-				Status:       "active",
+				Status:       "deployed",
 				Config:       make(map[string]string),
 				PreferRemote: serverReq.PreferRemote,
-				ResourceType: "mcp",
-				Runtime:      runtimeTarget,
+				ResourceType: resourceTypeMCP,
+				ProviderID:   providerID,
+				Origin:       "managed",
 				DeployedAt:   time.Now(),
 				UpdatedAt:    time.Now(),
 			}
@@ -798,69 +887,67 @@ func (s *registryServiceImpl) DeployAgent(ctx context.Context, agentName, versio
 	// If reconciliation fails, remove the deployment that we just added
 	// This is required because reconciler uses the DB as the source of truth for desired state
 	if err := s.ReconcileAll(ctx); err != nil {
-		if cleanupErr := s.db.RemoveDeployment(ctx, nil, agentName, version, "agent"); cleanupErr != nil {
-			return nil, fmt.Errorf("deployment created but reconciliation failed: %v (cleanup failed: %v)", err, cleanupErr)
+		if deployment.ID != "" {
+			if cleanupErr := s.db.RemoveDeploymentByID(ctx, nil, deployment.ID); cleanupErr != nil {
+				return nil, fmt.Errorf("deployment created but reconciliation failed: %v (cleanup failed: %v)", err, cleanupErr)
+			}
+		} else {
+			return nil, fmt.Errorf("deployment created but reconciliation failed: %v (cleanup skipped: deployment id missing)", err)
 		}
 		return nil, fmt.Errorf("deployment created but reconciliation failed: %w", err)
 	}
 
-	return s.db.GetDeploymentByNameAndVersion(ctx, nil, agentName, version, "agent")
+	return s.db.GetDeploymentByID(ctx, nil, deployment.ID)
 }
 
-// UpdateDeploymentConfig updates the configuration for a deployment
-func (s *registryServiceImpl) UpdateDeploymentConfig(ctx context.Context, serverName string, version string, artifactType string, config map[string]string) (*models.Deployment, error) {
-	_, err := s.db.GetDeploymentByNameAndVersion(ctx, nil, serverName, version, artifactType)
-	if err != nil {
-		return nil, err
+func cleanupKubernetesResourcesForDeployment(ctx context.Context, deployment *models.Deployment) error {
+	namespace := ""
+	if deployment.Config != nil {
+		namespace = deployment.Config["KAGENT_NAMESPACE"]
+	}
+	if namespace == "" {
+		namespace = runtime.DefaultNamespace()
 	}
 
-	err = s.db.UpdateDeploymentConfig(ctx, nil, serverName, version, artifactType, config)
-	if err != nil {
-		return nil, err
+	if deployment.ResourceType == resourceTypeAgent {
+		return runtime.DeleteKubernetesAgent(ctx, deployment.ServerName, deployment.Version, namespace)
 	}
-
-	// Trigger reconciliation to apply the config changes
-	if err := s.ReconcileAll(ctx); err != nil {
-		return nil, fmt.Errorf("config updated but reconciliation failed: %w", err)
+	if deployment.ResourceType == resourceTypeMCP {
+		if err := runtime.DeleteKubernetesMCPServer(ctx, deployment.ServerName, namespace); err != nil {
+			return err
+		}
+		return runtime.DeleteKubernetesRemoteMCPServer(ctx, deployment.ServerName, namespace)
 	}
-
-	return s.db.GetDeploymentByNameAndVersion(ctx, nil, serverName, version, artifactType)
+	return nil
 }
 
-// RemoveDeployment removes a deployment
-func (s *registryServiceImpl) RemoveDeployment(ctx context.Context, serverName string, version string, artifactType string) error {
-	deployment, err := s.db.GetDeploymentByNameAndVersion(ctx, nil, serverName, version, artifactType)
-	if err != nil {
-		return err
+func (s *registryServiceImpl) removeDeploymentRecord(ctx context.Context, deployment *models.Deployment) error {
+	if deployment == nil {
+		return database.ErrNotFound
+	}
+	if deployment.ID == "" {
+		return database.ErrInvalidInput
+	}
+	if deployment.Origin == originDiscovered {
+		return database.ErrInvalidInput
 	}
 
 	// Clean up kubernetes resources
-	if deployment != nil && deployment.Runtime == "kubernetes" { //nolint:nestif
-		namespace := ""
-		if deployment.Config != nil {
-			namespace = deployment.Config["KAGENT_NAMESPACE"]
+	platform := ""
+	if strings.TrimSpace(deployment.ProviderID) != "" {
+		provider, err := s.resolveProviderByID(ctx, deployment.ProviderID)
+		if err != nil {
+			return fmt.Errorf("failed to resolve provider %q for deployment %s: %w", deployment.ProviderID, deployment.ID, err)
 		}
-		if namespace == "" {
-			namespace = runtime.DefaultNamespace()
-		}
-
-		if artifactType == "agent" {
-			if err := runtime.DeleteKubernetesAgent(ctx, serverName, version, namespace); err != nil {
-				return err
-			}
-		}
-		if artifactType == "mcp" {
-			if err := runtime.DeleteKubernetesMCPServer(ctx, serverName, namespace); err != nil {
-				return err
-			}
-			if err := runtime.DeleteKubernetesRemoteMCPServer(ctx, serverName, namespace); err != nil {
-				return err
-			}
+		platform = provider.Platform
+	}
+	if strings.ToLower(strings.TrimSpace(platform)) == platformKubernetes {
+		if err := cleanupKubernetesResourcesForDeployment(ctx, deployment); err != nil {
+			return err
 		}
 	}
 
-	err = s.db.RemoveDeployment(ctx, nil, serverName, version, artifactType)
-	if err != nil {
+	if err := s.db.RemoveDeploymentByID(ctx, nil, deployment.ID); err != nil {
 		return err
 	}
 
@@ -871,10 +958,61 @@ func (s *registryServiceImpl) RemoveDeployment(ctx context.Context, serverName s
 	return nil
 }
 
+func (s *registryServiceImpl) findDeploymentByIdentity(ctx context.Context, resourceName string, version string, artifactType string) (*models.Deployment, error) {
+	filter := &models.DeploymentFilter{
+		ResourceType: &artifactType,
+		ResourceName: &resourceName,
+	}
+	deployments, err := s.db.GetDeployments(ctx, nil, filter)
+	if err != nil {
+		return nil, err
+	}
+	for _, deployment := range deployments {
+		if deployment.ServerName == resourceName &&
+			deployment.Version == version &&
+			deployment.ResourceType == artifactType {
+			return deployment, nil
+		}
+	}
+	return nil, database.ErrNotFound
+}
+
+// RemoveDeploymentByID removes a deployment by UUID.
+func (s *registryServiceImpl) RemoveDeploymentByID(ctx context.Context, id string) error {
+	deployment, err := s.db.GetDeploymentByID(ctx, nil, id)
+	if err != nil {
+		return err
+	}
+	return s.removeDeploymentRecord(ctx, deployment)
+}
+
 // RemoveAgent removes an agent deployment
 func (s *registryServiceImpl) RemoveAgent(ctx context.Context, agentName string, version string) error {
-	// Use RemoveDeployment implementation as it handles both types based on deployment record
-	return s.RemoveDeployment(ctx, agentName, version, "agent")
+	deployment, err := s.findDeploymentByIdentity(ctx, agentName, version, "agent")
+	if err != nil {
+		return err
+	}
+	return s.removeDeploymentRecord(ctx, deployment)
+}
+
+func (s *registryServiceImpl) reconcileAdapterOnlyDeployments(ctx context.Context, providerPlatform string, deployments []*models.Deployment) error {
+	if providerPlatform == platformLocal || providerPlatform == platformKubernetes {
+		return nil
+	}
+
+	adapter, ok := s.deploymentAdapters[providerPlatform]
+	if !ok {
+		return fmt.Errorf("%w: no deployment adapter registered for provider platform %q", database.ErrInvalidInput, providerPlatform)
+	}
+	for _, dep := range deployments {
+		if dep == nil || dep.Origin == originDiscovered {
+			continue
+		}
+		if _, err := adapter.Deploy(ctx, dep); err != nil {
+			return fmt.Errorf("failed %s adapter reconciliation for deployment %s: %w", providerPlatform, dep.ID, err)
+		}
+	}
+	return nil
 }
 
 // ReconcileAll fetches all deployments from database and reconciles containers
@@ -888,25 +1026,41 @@ func (s *registryServiceImpl) ReconcileAll(ctx context.Context) error {
 
 	log.Printf("Reconciling %d deployment(s)", len(deployments))
 
-	type runtimeRequests struct {
+	type providerPlatformRequests struct {
 		servers []*registry.MCPServerRunRequest
 		agents  []*registry.AgentRunRequest
+		// Keep original deployment rows for provider-platform adapter delegation.
+		deployments []*models.Deployment
 	}
-	// Store server and agent run requests by runtime target
-	requestsByRuntime := map[string]*runtimeRequests{
-		"local":      {},
-		"kubernetes": {},
+	requestsByProviderPlatform := map[string]*providerPlatformRequests{}
+	getProviderPlatformRequests := func(providerPlatform string) *providerPlatformRequests {
+		if requestsByProviderPlatform[providerPlatform] == nil {
+			requestsByProviderPlatform[providerPlatform] = &providerPlatformRequests{}
+		}
+		return requestsByProviderPlatform[providerPlatform]
 	}
 
 	for _, dep := range deployments {
-		runtimeTarget := dep.Runtime
-		if runtimeTarget == "" {
-			runtimeTarget = "local"
+		provider, err := s.resolveProviderByID(ctx, dep.ProviderID)
+		if err != nil {
+			log.Printf("Warning: Deployment %s has unknown provider %q; skipping: %v", dep.ID, dep.ProviderID, err)
+			continue
 		}
-		targetRequests := requestsByRuntime[runtimeTarget]
+		providerPlatform := strings.ToLower(strings.TrimSpace(provider.Platform))
+		if providerPlatform == "" {
+			log.Printf("Warning: Deployment %s has empty provider platform type; skipping", dep.ID)
+			continue
+		}
+		targetRequests := getProviderPlatformRequests(providerPlatform)
+		targetRequests.deployments = append(targetRequests.deployments, dep)
+
+		// Non-OSS provider platform types are delegated to registered deployment adapters.
+		if providerPlatform != platformLocal && providerPlatform != platformKubernetes {
+			continue
+		}
 
 		switch dep.ResourceType {
-		case "mcp":
+		case resourceTypeMCP:
 			depServer, err := s.GetServerByNameAndVersion(ctx, dep.ServerName, dep.Version)
 			if err != nil {
 				log.Printf("Warning: Failed to get server %s v%s: %v", dep.ServerName, dep.Version, err)
@@ -936,7 +1090,7 @@ func (s *registryServiceImpl) ReconcileAll(ctx context.Context) error {
 				HeaderValues:   headerValues,
 			})
 
-		case "agent":
+		case resourceTypeAgent:
 			depAgent, err := s.GetAgentByNameAndVersion(ctx, dep.ServerName, dep.Version)
 			if err != nil {
 				log.Printf("Warning: Failed to get agent %s v%s: %v", dep.ServerName, dep.Version, err)
@@ -958,8 +1112,12 @@ func (s *registryServiceImpl) ReconcileAll(ctx context.Context) error {
 
 	regTranslator := registry.NewTranslator()
 
-	for runtimeTarget, requests := range requestsByRuntime {
+	for providerPlatform, requests := range requestsByProviderPlatform {
 		if len(requests.servers) == 0 && len(requests.agents) == 0 {
+			// For non-local provider platform types, delegate reconciliation to adapters.
+			if err := s.reconcileAdapterOnlyDeployments(ctx, providerPlatform, requests.deployments); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -981,13 +1139,13 @@ func (s *registryServiceImpl) ReconcileAll(ctx context.Context) error {
 			agentReq.ResolvedMCPServers = resolvedServers
 			requests.servers = append(requests.servers, resolvedServers...)
 			if s.cfg.Verbose && len(resolvedServers) > 0 {
-				log.Printf("Resolved %d MCP server(s) of type 'registry' for %s agent %s", len(resolvedServers), runtimeTarget, agentReq.RegistryAgent.Name)
+				log.Printf("Resolved %d MCP server(s) of type 'registry' for %s agent %s", len(resolvedServers), providerPlatform, agentReq.RegistryAgent.Name)
 			}
 		}
 
-		// Create the appropriate runtime translator for the target runtime and reconcile the requests
+		// Create the runtime translator for the selected provider platform and reconcile requests.
 		var agentRuntime runtime.AgentRegistryRuntime
-		if runtimeTarget == "kubernetes" {
+		if providerPlatform == platformKubernetes {
 			k8sTranslator := kagent.NewTranslator()
 			agentRuntime = runtime.NewAgentRegistryRuntime(regTranslator, k8sTranslator, s.cfg.RuntimeDir, s.cfg.Verbose)
 		} else {
@@ -996,7 +1154,7 @@ func (s *registryServiceImpl) ReconcileAll(ctx context.Context) error {
 		}
 
 		if err := agentRuntime.ReconcileAll(ctx, requests.servers, requests.agents); err != nil {
-			return fmt.Errorf("failed %s reconciliation: %w", runtimeTarget, err)
+			return fmt.Errorf("failed %s reconciliation: %w", providerPlatform, err)
 		}
 	}
 
@@ -1078,27 +1236,16 @@ func (s *registryServiceImpl) listKubernetesDeployments(ctx context.Context, nam
 		return labels != nil && labels["aregistry.ai/managed"] == "true"
 	}
 
-	// Helper to determine status from conditions (Ready or Pending)
-	getStatus := func(conditions []metav1.Condition) string {
-		for _, cond := range conditions {
-			// Check for Ready (agents) or Accepted (MCP servers)
-			if (cond.Type == "Ready" || cond.Type == "Accepted") && cond.Status == metav1.ConditionTrue {
-				return "Ready"
-			}
-		}
-		return "Pending"
-	}
-
 	// Helper to append a generic resource to the list
 	addResource := func(
 		resType, name, ns string,
 		labels map[string]string,
 		creation time.Time,
-		conditions []metav1.Condition,
+		_ []metav1.Condition,
 	) {
-		resourceType := "agent"
+		resourceType := resourceTypeAgent
 		if resType == "mcpserver" || resType == "remotemcpserver" {
-			resourceType = "mcp"
+			resourceType = resourceTypeMCP
 		}
 
 		preferRemote := resType == "remotemcpserver"
@@ -1108,11 +1255,12 @@ func (s *registryServiceImpl) listKubernetesDeployments(ctx context.Context, nam
 			Version:      "unknown",
 			DeployedAt:   creation,
 			UpdatedAt:    creation,
-			Status:       getStatus(conditions),
+			Status:       "deployed",
 			Config:       labels,
 			PreferRemote: preferRemote,
 			ResourceType: resourceType,
-			Runtime:      "kubernetes",
+			ProviderID:   kubernetesProviderID,
+			Origin:       "managed",
 			IsExternal:   !isManaged(labels),
 		}
 		deployments = append(deployments, d)
