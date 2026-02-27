@@ -891,7 +891,8 @@ func TestCleanupExistingDeployment(t *testing.T) {
 				Version:      "1.0.0",
 				Status:       "active",
 				ResourceType: "mcp",
-				Config:       map[string]string{},
+				ProviderID:   "local",
+				Env:          map[string]string{},
 			},
 			resourceType:       "mcp",
 			expectError:        false,
@@ -905,7 +906,8 @@ func TestCleanupExistingDeployment(t *testing.T) {
 				Version:      "1.0.0",
 				Status:       "active",
 				ResourceType: "agent",
-				Config:       map[string]string{"KAGENT_NAMESPACE": "test-ns"},
+				ProviderID:   "kubernetes",
+				Env:          map[string]string{"KAGENT_NAMESPACE": "test-ns"},
 			},
 			resourceType:       "agent",
 			expectError:        false,
@@ -935,7 +937,8 @@ func TestCleanupExistingDeployment(t *testing.T) {
 				Version:      "1.0.0",
 				Status:       "active",
 				ResourceType: "mcp",
-				Config:       map[string]string{},
+				ProviderID:   "local",
+				Env:          map[string]string{},
 			},
 			removeErr:          fmt.Errorf("connection refused"),
 			resourceType:       "mcp",
@@ -949,16 +952,16 @@ func TestCleanupExistingDeployment(t *testing.T) {
 			removeCalled := false
 
 			mockDB := &deploymentMockDB{
-				getDeploymentsFn: func(_ context.Context, _ pgx.Tx, _ *models.DeploymentFilter) ([]*models.Deployment, error) {
+				getDeploymentByIDFn: func(_ context.Context, _ pgx.Tx, _ string) (*models.Deployment, error) {
 					if tt.lookupErr != nil {
 						return nil, tt.lookupErr
 					}
 					if tt.existingDeployment != nil {
-						return []*models.Deployment{tt.existingDeployment}, nil
+						return tt.existingDeployment, nil
 					}
-					return nil, nil
+					return nil, database.ErrNotFound
 				},
-				removeDeploymentByIDFn: func(_ context.Context, _ pgx.Tx, id string) error {
+				removeDeploymentByIdFn: func(_ context.Context, _ pgx.Tx, id string) error {
 					removeCalled = true
 					if tt.removeErr != nil {
 						return tt.removeErr
@@ -969,7 +972,7 @@ func TestCleanupExistingDeployment(t *testing.T) {
 
 			svc := &registryServiceImpl{db: mockDB}
 
-			err := svc.cleanupExistingDeployment(ctx, "com.example/test", "1.0.0", tt.resourceType)
+			err := svc.cleanupExistingDeployment(ctx, "1234", "local")
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -986,16 +989,16 @@ func TestCleanupExistingDeployment(t *testing.T) {
 // the methods needed for testing deployment cleanup logic. All other methods panic.
 type deploymentMockDB struct {
 	database.Database      // embed interface so unimplemented methods panic
-	getDeploymentsFn       func(ctx context.Context, tx pgx.Tx, filter *models.DeploymentFilter) ([]*models.Deployment, error)
-	removeDeploymentByIDFn func(ctx context.Context, tx pgx.Tx, id string) error
+	getDeploymentByIDFn    func(ctx context.Context, tx pgx.Tx, id string) (*models.Deployment, error)
+	removeDeploymentByIdFn func(ctx context.Context, tx pgx.Tx, id string) error
 }
 
-func (m *deploymentMockDB) GetDeployments(ctx context.Context, tx pgx.Tx, filter *models.DeploymentFilter) ([]*models.Deployment, error) {
-	return m.getDeploymentsFn(ctx, tx, filter)
+func (m *deploymentMockDB) GetDeploymentByID(ctx context.Context, tx pgx.Tx, id string) (*models.Deployment, error) {
+	return m.getDeploymentByIDFn(ctx, tx, id)
 }
 
 func (m *deploymentMockDB) RemoveDeploymentByID(ctx context.Context, tx pgx.Tx, id string) error {
-	return m.removeDeploymentByIDFn(ctx, tx, id)
+	return m.removeDeploymentByIdFn(ctx, tx, id)
 }
 
 // Helper functions
