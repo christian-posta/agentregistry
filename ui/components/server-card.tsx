@@ -30,8 +30,9 @@ export function ServerCard({ server, onDelete, onPublish, onDeploy, onGateway, s
   const { server: serverData, _meta } = server
   const official = _meta?.['io.modelcontextprotocol.registry/official']
   
-  // Extract metadata
-  const publisherMetadata = serverData._meta?.['io.modelcontextprotocol.registry/publisher-provided']?.['aregistry.ai/metadata']
+  // Extract metadata - cast through Record<string, any> since the generated types use { [key: string]: unknown }
+  const publisherProvided = serverData._meta?.['io.modelcontextprotocol.registry/publisher-provided'] as Record<string, any> | undefined
+  const publisherMetadata = publisherProvided?.['aregistry.ai/metadata'] as Record<string, any> | undefined
   const githubStars = publisherMetadata?.stars
   const identityData = publisherMetadata?.identity
 
