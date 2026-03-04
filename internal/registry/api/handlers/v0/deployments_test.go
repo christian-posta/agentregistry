@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	v0 "github.com/agentregistry-dev/agentregistry/internal/registry/api/handlers/v0"
+	"github.com/agentregistry-dev/agentregistry/internal/registry/service"
 	servicetesting "github.com/agentregistry-dev/agentregistry/internal/registry/service/testing"
 	"github.com/agentregistry-dev/agentregistry/pkg/models"
 	"github.com/agentregistry-dev/agentregistry/pkg/registry/database"
@@ -198,7 +200,7 @@ func TestCreateDeployment_UsesAdapterWhenRegistered(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	var got models.Deployment
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
-	assert.NotEmpty(t, got.ID)
+	assert.Equal(t, "adapter-dep-1", got.ID)
 	assert.Equal(t, "io.github.user/weather", got.ServerName)
 }
 
@@ -238,6 +240,66 @@ func TestCreateDeployment_InvalidInputFromAdapterReturnsBadRequest(t *testing.T)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestCreateDeployment_AllowsMultipleDeploymentsForSameArtifact(t *testing.T) {
+	reg := servicetesting.NewFakeRegistry()
+	reg.GetProviderByIDFn = func(ctx context.Context, providerID string) (*models.Provider, error) {
+		return &models.Provider{ID: providerID, Platform: "local"}, nil
+	}
+	createCount := 0
+	reg.CreateDeploymentFn = func(ctx context.Context, req *models.Deployment, platform string) (*models.Deployment, error) {
+		createCount++
+		return &models.Deployment{
+			ID:           fmt.Sprintf("adapter-dep-%d", createCount),
+			ServerName:   req.ServerName,
+			Version:      req.Version,
+			ResourceType: req.ResourceType,
+			ProviderID:   req.ProviderID,
+			Status:       "deployed",
+			Origin:       "managed",
+			Env:          req.Env,
+		}, nil
+	}
+
+	mux := http.NewServeMux()
+	api := humago.New(mux, huma.DefaultConfig("Test API", "1.0.0"))
+	v0.RegisterDeploymentsEndpoints(api, "/v0", reg, v0.PlatformExtensions{
+		ProviderPlatforms: v0.DefaultProviderPlatformAdapters(reg),
+		DeploymentPlatforms: map[string]registrytypes.DeploymentPlatformAdapter{
+			"local": &fakeDeploymentAdapter{},
+		},
+	})
+
+	body := map[string]any{
+		"serverName":   "io.github.user/weather",
+		"version":      "1.0.0",
+		"resourceType": "mcp",
+		"providerId":   "local",
+	}
+	payload, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req1 := httptest.NewRequest(http.MethodPost, "/v0/deployments", bytes.NewReader(payload))
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	mux.ServeHTTP(w1, req1)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v0/deployments", bytes.NewReader(payload))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+
+	require.Equal(t, http.StatusOK, w1.Code)
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	var first models.Deployment
+	var second models.Deployment
+	require.NoError(t, json.Unmarshal(w1.Body.Bytes(), &first))
+	require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &second))
+	assert.NotEmpty(t, first.ID)
+	assert.NotEmpty(t, second.ID)
+	assert.NotEqual(t, first.ID, second.ID)
+}
+
 func TestDeleteDeployment_UsesAdapterWhenRegistered(t *testing.T) {
 	reg := servicetesting.NewFakeRegistry()
 	reg.GetDeploymentByIDFn = func(ctx context.Context, id string) (*models.Deployment, error) {
@@ -274,6 +336,40 @@ func TestDeleteDeployment_UsesAdapterWhenRegistered(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, w.Code)
 	assert.True(t, adapter.undeployCalled)
+}
+
+func TestDeleteDeployment_UnsupportedPlatformReturnsBadRequest(t *testing.T) {
+	reg := servicetesting.NewFakeRegistry()
+	reg.GetDeploymentByIDFn = func(ctx context.Context, id string) (*models.Deployment, error) {
+		return &models.Deployment{
+			ID:         id,
+			ProviderID: "local",
+			Status:     "deployed",
+			Origin:     "managed",
+		}, nil
+	}
+	reg.GetProviderByIDFn = func(ctx context.Context, providerID string) (*models.Provider, error) {
+		return &models.Provider{ID: providerID, Platform: "local"}, nil
+	}
+	reg.UndeployDeploymentFn = func(ctx context.Context, deployment *models.Deployment, platform string) error {
+		return &service.UnsupportedDeploymentPlatformError{Platform: platform}
+	}
+
+	mux := http.NewServeMux()
+	api := humago.New(mux, huma.DefaultConfig("Test API", "1.0.0"))
+	v0.RegisterDeploymentsEndpoints(api, "/v0", reg, v0.PlatformExtensions{
+		ProviderPlatforms: v0.DefaultProviderPlatformAdapters(reg),
+		DeploymentPlatforms: map[string]registrytypes.DeploymentPlatformAdapter{
+			"local": &fakeDeploymentAdapter{},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v0/deployments/dep-unsupported", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "Unsupported provider or platform for deployment")
 }
 
 func TestGetDeploymentLogs_UsesAdapterWhenRegistered(t *testing.T) {

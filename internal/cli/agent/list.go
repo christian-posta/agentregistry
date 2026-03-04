@@ -113,22 +113,10 @@ func printAgentsTable(agents []*models.AgentResponse, deployedAgents []*client.D
 	t := printer.NewTablePrinter(os.Stdout)
 	t.SetHeaders("Name", "Version", "Framework", "Language", "Provider", "Model", "Deployed")
 
-	deployedMap := make(map[string]*client.DeploymentResponse)
-	for _, d := range deployedAgents {
-		if d.ResourceType == "agent" {
-			deployedMap[d.ServerName] = d
-		}
-	}
+	deploymentCounts := common.BuildDeploymentCounts(deployedAgents, "agent")
 
 	for _, a := range agents {
-		deployedStatus := "False"
-		if deployment, ok := deployedMap[a.Agent.Name]; ok {
-			if deployment.Version == a.Agent.Version {
-				deployedStatus = "True"
-			} else {
-				deployedStatus = fmt.Sprintf("True (%s)", common.FormatVersionForDisplay(deployment.Version))
-			}
-		}
+		deployedStatus := common.DeployedStatus(deploymentCounts, a.Agent.Name, a.Agent.Version, true)
 
 		t.AddRow(
 			printer.TruncateString(a.Agent.Name, 40),

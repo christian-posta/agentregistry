@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	cliCommon "github.com/agentregistry-dev/agentregistry/internal/cli/common"
 	"github.com/agentregistry-dev/agentregistry/internal/client"
 	"github.com/agentregistry-dev/agentregistry/pkg/printer"
 	v0 "github.com/modelcontextprotocol/registry/pkg/api/v0"
@@ -211,14 +212,7 @@ func printServersTable(servers []*v0.ServerResponse, deployedServers []*client.D
 	t := printer.NewTablePrinter(os.Stdout)
 	t.SetHeaders("Name", "Version", "Type", "Deployed", "Updated")
 
-	// Create a map of deployed servers by name and version
-	deployedMap := make(map[string]map[string]*client.DeploymentResponse)
-	for _, d := range deployedServers {
-		if deployedMap[d.ServerName] == nil {
-			deployedMap[d.ServerName] = make(map[string]*client.DeploymentResponse)
-		}
-		deployedMap[d.ServerName][d.Version] = d
-	}
+	deploymentCounts := cliCommon.BuildDeploymentCounts(deployedServers, "mcp")
 
 	for _, s := range servers {
 		registryType := "<none>"
@@ -236,12 +230,7 @@ func printServersTable(servers []*v0.ServerResponse, deployedServers []*client.D
 
 		fullName := s.Server.Name
 
-		deployedStatus := "False"
-		if serverDeployments, ok := deployedMap[s.Server.Name]; ok {
-			if _, ok := serverDeployments[s.Server.Version]; ok {
-				deployedStatus = "True"
-			}
-		}
+		deployedStatus := cliCommon.DeployedStatus(deploymentCounts, s.Server.Name, s.Server.Version, false)
 
 		t.AddRow(
 			printer.TruncateString(fullName, 50),
