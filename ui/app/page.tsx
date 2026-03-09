@@ -28,6 +28,7 @@ import { ServerDetail } from "@/components/server-detail"
 import { SkillDetail } from "@/components/skill-detail"
 import { AgentDetail } from "@/components/agent-detail"
 import { ImportDialog } from "@/components/import-dialog"
+import { GatewayManifestDialog } from "@/components/gateway-manifest-dialog"
 import { AddServerDialog } from "@/components/add-server-dialog"
 import { ImportSkillsDialog } from "@/components/import-skills-dialog"
 import { AddSkillDialog } from "@/components/add-skill-dialog"
@@ -81,6 +82,7 @@ export default function AdminPage() {
   const [selectedServer, setSelectedServer] = useState<ServerResponse | null>(null)
   const [selectedSkill, setSelectedSkill] = useState<SkillResponse | null>(null)
   const [selectedAgent, setSelectedAgent] = useState<AgentResponse | null>(null)
+  const [gatewayServer, setGatewayServer] = useState<ServerResponse | null>(null)
   
   // Track scroll position for restoring after navigation
   const scrollPositionRef = useRef<number>(0)
@@ -651,6 +653,8 @@ export default function AdminPage() {
                       onClick={() => handleServerClick(server)}
                       showPublish={true}
                       onPublish={handlePublish}
+                      showGateway={true}
+                      onGateway={(s) => setGatewayServer(s)}
                     />
                   ))}
                 </div>
@@ -769,6 +773,13 @@ export default function AdminPage() {
           </TabsContent>
         </Tabs>
       </div>
+
+      {/* Gateway Manifest Dialog */}
+      <GatewayManifestDialog
+        server={gatewayServer?.server ?? null}
+        open={!!gatewayServer}
+        onOpenChange={(open) => { if (!open) setGatewayServer(null) }}
+      />
 
       {/* Server Dialogs */}
       <ImportDialog

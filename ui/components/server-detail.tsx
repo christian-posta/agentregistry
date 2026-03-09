@@ -50,7 +50,10 @@ import {
   Clock,
   ShieldCheck,
   BadgeCheck,
+  Network,
+  Download,
 } from "lucide-react"
+import { generateManifests, sanitizeName } from "@/lib/gateway-manifest"
 
 interface ServerDetailProps {
   server: ServerResponse & { allVersions?: ServerResponse[] }
@@ -66,6 +69,19 @@ export function ServerDetail({ server, onClose, onServerCopied, onPublish }: Ser
   const [copyError, setCopyError] = useState<string | null>(null)
   const [selectedVersion, setSelectedVersion] = useState<ServerResponse>(server)
   const [jsonCopied, setJsonCopied] = useState(false)
+
+  // Gateway tab state
+  const [gwName, setGwName] = useState("")
+  const [gwNamespace, setGwNamespace] = useState("agentgateway-system")
+  const [gwResNamespace, setGwResNamespace] = useState("agentgateway-system")
+  const firstRemote = server.server.remotes?.find(r => r.type === 'streamable-http' || r.type === 'sse')
+  const [gwURL, setGwURL] = useState(firstRemote?.url ?? "")
+  const [gwProtocol, setGwProtocol] = useState<'StreamableHTTP' | 'SSE'>(
+    firstRemote?.type === 'sse' ? 'SSE' : 'StreamableHTTP'
+  )
+  const [gwOutput, setGwOutput] = useState("")
+  const [gwCopied, setGwCopied] = useState(false)
+  const [gwError, setGwError] = useState<string | null>(null)
   
   // Get all versions, defaulting to just the current server if not available
   const allVersions = server.allVersions || [server]
@@ -382,6 +398,10 @@ export function ServerDetail({ server, onClose, onServerCopied, onPublish }: Ser
               <TabsTrigger value="remotes">Remotes</TabsTrigger>
             )}
             <TabsTrigger value="raw">Raw Data</TabsTrigger>
+            <TabsTrigger value="gateway" className="gap-1.5">
+              <Network className="h-3.5 w-3.5" />
+              Gateway
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="overview" className="space-y-4">
@@ -780,6 +800,145 @@ export function ServerDetail({ server, onClose, onServerCopied, onPublish }: Ser
               <pre className="bg-muted p-4 rounded-lg overflow-x-auto text-xs">
                 {JSON.stringify(selectedVersion, null, 2)}
               </pre>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="gateway">
+            <Card className="p-6">
+              <h3 className="text-lg font-semibold flex items-center gap-2 mb-2">
+                <Network className="h-5 w-5" />
+                Export Gateway Manifests
+              </h3>
+              <p className="text-sm text-muted-foreground mb-4">
+                Generate <code>AgentgatewayBackend</code> + <code>HTTPRoute</code> YAML to expose this server through an AgentGateway.
+              </p>
+
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium">Gateway Name</label>
+                    <input
+                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      placeholder="my-gateway"
+                      value={gwName}
+                      onChange={(e) => setGwName(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium">Gateway Namespace</label>
+                    <input
+                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      placeholder="agentgateway-system"
+                      value={gwNamespace}
+                      onChange={(e) => setGwNamespace(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Resource Namespace</label>
+                  <input
+                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    placeholder="agentgateway-system"
+                    value={gwResNamespace}
+                    onChange={(e) => setGwResNamespace(e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Remote URL</label>
+                  <input
+                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    placeholder="https://your-mcp-server/mcp"
+                    value={gwURL}
+                    onChange={(e) => setGwURL(e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Protocol</label>
+                  <Select value={gwProtocol} onValueChange={(v) => setGwProtocol(v as 'StreamableHTTP' | 'SSE')}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="StreamableHTTP">StreamableHTTP</SelectItem>
+                      <SelectItem value="SSE">SSE</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {gwError && <p className="text-sm text-destructive">{gwError}</p>}
+
+                <Button
+                  onClick={() => {
+                    setGwError(null)
+                    try {
+                      const yaml = generateManifests({
+                        serverName: serverData.name,
+                        gwName,
+                        gwNamespace,
+                        namespace: gwResNamespace,
+                        url: gwURL,
+                        protocol: gwProtocol,
+                      })
+                      setGwOutput(yaml)
+                    } catch (e) {
+                      setGwError(e instanceof Error ? e.message : String(e))
+                    }
+                  }}
+                  disabled={gwName.trim() === '' || gwURL.trim() === ''}
+                  className="w-full"
+                >
+                  Generate Manifests
+                </Button>
+
+                {gwOutput && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">Generated YAML</span>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(gwOutput)
+                              setGwCopied(true)
+                              setTimeout(() => setGwCopied(false), 2000)
+                            } catch { /* ignore */ }
+                          }}
+                        >
+                          {gwCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                          {gwCopied ? 'Copied!' : 'Copy'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={() => {
+                            const name = sanitizeName(serverData.name)
+                            const blob = new Blob([gwOutput], { type: 'text/yaml' })
+                            const url = URL.createObjectURL(blob)
+                            const a = document.createElement('a')
+                            a.href = url
+                            a.download = `${name}-gateway.yaml`
+                            a.click()
+                            URL.revokeObjectURL(url)
+                          }}
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          Download
+                        </Button>
+                      </div>
+                    </div>
+                    <pre className="bg-muted p-4 rounded-lg overflow-x-auto text-xs font-mono whitespace-pre">
+                      {gwOutput}
+                    </pre>
+                  </div>
+                )}
+              </div>
             </Card>
           </TabsContent>
         </Tabs>

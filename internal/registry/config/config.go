@@ -31,7 +31,8 @@ type Config struct {
 	OIDCPublishPerms string `env:"OIDC_PUBLISH_PERMISSIONS" envDefault:""`
 
 	// Agent Gateway Configuration
-	AgentGatewayPort uint16 `env:"AGENT_GATEWAY_PORT" envDefault:"8081"`
+	AgentGatewayPort   uint16 `env:"AGENT_GATEWAY_PORT" envDefault:"8081"`
+	KubeconfigPath     string `env:"KUBECONFIG_PATH" envDefault:""`
 
 	// Runtime Configuration
 	ReconcileOnStartup bool   `env:"RECONCILE_ON_STARTUP" envDefault:"true"`

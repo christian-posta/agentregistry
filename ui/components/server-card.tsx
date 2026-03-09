@@ -9,22 +9,24 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { Package, Calendar, Tag, ExternalLink, GitBranch, Star, Github, Globe, Trash2, Upload, ShieldCheck, BadgeCheck, Play } from "lucide-react"
+import { Package, Calendar, Tag, ExternalLink, GitBranch, Star, Github, Globe, Trash2, Upload, ShieldCheck, BadgeCheck, Play, Network } from "lucide-react"
 
 interface ServerCardProps {
   server: ServerResponse
   onDelete?: (server: ServerResponse) => void
   onPublish?: (server: ServerResponse) => void
   onDeploy?: (server: ServerResponse) => void
+  onGateway?: (server: ServerResponse) => void
   showDelete?: boolean
   showPublish?: boolean
   showDeploy?: boolean
+  showGateway?: boolean
   showExternalLinks?: boolean
   onClick?: () => void
   versionCount?: number
 }
 
-export function ServerCard({ server, onDelete, onPublish, onDeploy, showDelete = false, showPublish = false, showDeploy = false, showExternalLinks = true, onClick, versionCount }: ServerCardProps) {
+export function ServerCard({ server, onDelete, onPublish, onDeploy, onGateway, showDelete = false, showPublish = false, showDeploy = false, showGateway = false, showExternalLinks = true, onClick, versionCount }: ServerCardProps) {
   const { server: serverData, _meta } = server
   const official = _meta?.['io.modelcontextprotocol.registry/official']
   
@@ -144,6 +146,26 @@ export function ServerCard({ server, onDelete, onPublish, onDeploy, showDelete =
               </TooltipTrigger>
               <TooltipContent>
                 <p>Publish this server to your registry</p>
+              </TooltipContent>
+            </Tooltip>
+          )}
+          {showGateway && onGateway && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onGateway(server)
+                  }}
+                >
+                  <Network className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>Export Gateway Manifests</p>
               </TooltipContent>
             </Tooltip>
           )}
