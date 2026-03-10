@@ -173,9 +173,10 @@ var preRunDaemonBehavior = struct {
 	skipCommands map[string]map[string]bool
 }{
 	skipCommands: map[string]map[string]bool{
-		"agent": {"init": true},
-		"mcp":   {"init": true},
-		"skill": {"init": true},
+		"agent":       {"init": true},
+		"mcp":         {"init": true},
+		"skill":       {"init": true},
+		"agentgateway": {"list-gateways": true},
 	},
 }
 

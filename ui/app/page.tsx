@@ -255,6 +255,11 @@ export default function AdminPage() {
     setSelectedServer(null)
   }
 
+  // Open import dialog to publish (import) a server into the registry
+  const handlePublish = (_server: ServerResponse) => {
+    setImportDialogOpen(true)
+  }
+
   // Filter and sort servers based on search query and sort option
   useEffect(() => {
     let filtered = [...groupedServers]

@@ -5,7 +5,7 @@ This guide walks through registering GitHub's MCP server with the AgentRegistry 
 You can generate the required Kubernetes manifests in two ways:
 
 - **UI** — click the Network icon on any server card (or open the "Gateway" tab in server detail) to generate, copy, or download the YAML directly from the browser. No CLI or `kubectl` required.
-- **CLI** — use `arctl mcp publish --gateway ... --dry-run` to generate manifests, or omit `--dry-run` to apply them directly to the cluster.
+- **CLI** — use `arctl mcp deploy agentgateway <server-name> --gateway <gw> --dry-run` to generate manifests, or omit `--dry-run` to apply them directly to the cluster.
 
 ---
 
@@ -28,10 +28,15 @@ If you prefer not to use the CLI or don't have `kubectl` handy, the AgentRegistr
 Start the registry (which also serves the UI):
 
 ```bash
-arctl
+set -a && source .env && set +a && ./bin/arctl-server
 ```
 
-Then open `http://localhost:3000`.
+Verify it's up:
+
+```bash
+curl http://localhost:12121/v0/health
+# expected: {"status":"ok"}
+```
 
 ### A2 — Export Manifests from a Server Card
 
@@ -53,7 +58,7 @@ Alternatively, click a server card to open the detail view, then select the **Ga
 ### A4 — Apply the Manifests
 
 ```bash
-kubectl apply -f github-github-mcp-server-gateway.yaml
+kubectl apply -f com-githubcopilot-github-mcp-server-gateway.yaml
 ```
 
 ---
@@ -65,7 +70,7 @@ kubectl apply -f github-github-mcp-server-gateway.yaml
 First, check what gateways are available in your cluster:
 
 ```bash
-arctl gateway list --namespace agentgateway-system
+arctl mcp deploy agentgateway list-gateways --namespace agentgateway-system
 ```
 
 Example output:
@@ -80,20 +85,22 @@ Note the name and namespace — you'll use them in the next steps.
 
 ## Step 2 — Publish the Remote MCP Server
 
-Register GitHub's MCP server with the registry. No local files needed:
+Register GitHub's MCP server with the registry. No local files needed.
+
+The server name must use a **reverse-DNS namespace** that matches the remote URL's domain. For `https://api.githubcopilot.com/mcp`, the domain is `githubcopilot.com`, so use namespace `com.githubcopilot` (reversed). Do not use `github/github-mcp-server` — that format is invalid.
 
 ```bash
-arctl mcp publish \
-  --name github/github-mcp-server \
-  --url https://api.githubcopilot.com/mcp \
-  --protocol streamable-http \
-  --description "GitHub's official MCP server (Copilot, repos, issues, PRs)"
+arctl mcp publish com.githubcopilot/github-mcp-server \
+  --remote-url https://api.githubcopilot.com/mcp \
+  --transport streamable-http \
+  --description "GitHub's official MCP server (Copilot, repos, issues, PRs)" \
+  --version 1.0.0
 ```
 
 Example output:
 ```
-Publishing remote MCP server: github/github-mcp-server
-Server published successfully: github/github-mcp-server
+Publishing remote MCP server: com.githubcopilot/github-mcp-server
+Server published successfully: com.githubcopilot/github-mcp-server
 ```
 
 The server is now registered in the registry. You can verify:
@@ -109,10 +116,7 @@ arctl list
 Before touching the cluster, generate the manifests to review them:
 
 ```bash
-arctl mcp publish \
-  --name github/github-mcp-server \
-  --url https://api.githubcopilot.com/mcp \
-  --protocol streamable-http \
+arctl mcp deploy agentgateway com.githubcopilot/github-mcp-server \
   --gateway my-gw \
   --gateway-namespace agentgateway-system \
   --dry-run
@@ -124,12 +128,12 @@ Output:
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayBackend
 metadata:
-  name: github-github-mcp-server
+  name: com-githubcopilot-github-mcp-server
   namespace: agentgateway-system
 spec:
   mcp:
     targets:
-    - name: github-github-mcp-server-target
+    - name: com-githubcopilot-github-mcp-server-target
       static:
         host: api.githubcopilot.com
         port: 443
@@ -139,7 +143,7 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: github-github-mcp-server
+  name: com-githubcopilot-github-mcp-server
   namespace: agentgateway-system
 spec:
   parentRefs:
@@ -149,9 +153,9 @@ spec:
   - matches:
     - path:
         type: PathPrefix
-        value: /github-github-mcp-server/mcp
+        value: /com-githubcopilot-github-mcp-server/mcp
     backendRefs:
-    - name: github-github-mcp-server
+    - name: com-githubcopilot-github-mcp-server
       group: agentgateway.dev
       kind: AgentgatewayBackend
 ```
@@ -163,10 +167,7 @@ spec:
 Pipe the output to a file, review it, then apply:
 
 ```bash
-arctl mcp publish \
-  --name github/github-mcp-server \
-  --url https://api.githubcopilot.com/mcp \
-  --protocol streamable-http \
+arctl mcp deploy agentgateway com.githubcopilot/github-mcp-server \
   --gateway my-gw \
   --gateway-namespace agentgateway-system \
   --dry-run > k8s/github-mcp-server.yaml
@@ -185,19 +186,14 @@ kubectl apply -f k8s/github-mcp-server.yaml
 Or skip the file and let `arctl` apply directly to the cluster:
 
 ```bash
-arctl mcp publish \
-  --name github/github-mcp-server \
-  --url https://api.githubcopilot.com/mcp \
-  --protocol streamable-http \
+arctl mcp deploy agentgateway com.githubcopilot/github-mcp-server \
   --gateway my-gw \
   --gateway-namespace agentgateway-system
 ```
 
 Output:
 ```
-Publishing remote MCP server: github/github-mcp-server
-Server published successfully: github/github-mcp-server
-Exposed at: /github-github-mcp-server/mcp via gateway my-gw
+Deployed AgentGateway config for com.githubcopilot/github-mcp-server at /com-githubcopilot-github-mcp-server/mcp via gateway my-gw
 ```
 
 ---
@@ -211,19 +207,18 @@ kubectl get httproute -n agentgateway-system
 
 The server is now reachable through the gateway at:
 ```
-http://<gateway-ip>/github-github-mcp-server/mcp
+http://<gateway-ip>/com-githubcopilot-github-mcp-server/mcp
 ```
 
 ---
 
 ## Step 7 — Clean Up
 
-To remove the gateway resources when you no longer need them:
+To remove the gateway resources when you no longer need them, delete the resources manually:
 
 ```bash
-arctl mcp remove github/github-mcp-server \
-  --gateway my-gw \
-  --gateway-namespace agentgateway-system
+kubectl delete agentgatewaybackend com-githubcopilot-github-mcp-server -n agentgateway-system
+kubectl delete httproute com-githubcopilot-github-mcp-server -n agentgateway-system
 ```
 
 ---
@@ -243,9 +238,9 @@ arctl mcp remove github/github-mcp-server \
 
 | Goal | Command |
 |------|---------|
-| List available gateways | `arctl gateway list --namespace <ns>` |
-| Publish remote server | `arctl mcp publish --name <n> --url <url>` |
-| Preview k8s manifests | `... --gateway <gw> --dry-run` |
-| Save manifests to file | `... --dry-run > manifests.yaml` |
-| Apply directly to cluster | `... --gateway <gw>` (no `--dry-run`) |
-| Remove gateway resources | `arctl mcp remove <name> --gateway <gw>` |
+| List available gateways | `arctl mcp deploy agentgateway list-gateways --namespace <ns>` |
+| Publish remote server | `arctl mcp publish <name> --remote-url <url> --transport streamable-http` |
+| Preview k8s manifests | `arctl mcp deploy agentgateway <server> --gateway <gw> --dry-run` |
+| Save manifests to file | `arctl mcp deploy agentgateway <server> --gateway <gw> --dry-run > manifests.yaml` |
+| Apply directly to cluster | `arctl mcp deploy agentgateway <server> --gateway <gw>` |
+| Remove gateway resources | `kubectl delete agentgatewaybackend,httproute <sanitized-name> -n <ns>` |

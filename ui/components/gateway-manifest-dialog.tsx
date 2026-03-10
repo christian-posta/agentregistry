@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { ServerJSON } from "@/lib/admin-api"
+import { ServerJson } from "@/lib/admin-api"
 import { generateManifests, sanitizeName } from "@/lib/gateway-manifest"
 import {
   Dialog,
@@ -23,12 +23,12 @@ import {
 import { Copy, Check, Download } from "lucide-react"
 
 interface GatewayManifestDialogProps {
-  server: ServerJSON | null
+  server: ServerJson | null
   open: boolean
   onOpenChange: (open: boolean) => void
 }
 
-function getFirstRemote(server: ServerJSON | null): { url: string; protocol: 'StreamableHTTP' | 'SSE' } | null {
+function getFirstRemote(server: ServerJson | null): { url: string; protocol: 'StreamableHTTP' | 'SSE' } | null {
   if (!server?.remotes) return null
   for (const r of server.remotes) {
     if ((r.type === 'streamable-http' || r.type === 'sse') && r.url) {
