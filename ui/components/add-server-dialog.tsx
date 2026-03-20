@@ -10,6 +10,8 @@ import { createServerV0, type ServerJson } from "@/lib/admin-api"
 import { Loader2, AlertCircle, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
+type RemoteTransportType = "streamable-http" | "sse"
+
 interface AddServerDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -31,7 +33,7 @@ export function AddServerDialog({ open, onOpenChange, onServerAdded }: AddServer
 
   // Dynamic fields
   const [packages, setPackages] = useState<Array<{ identifier: string; version: string; registryType: string; transport: string }>>([])
-  const [remotes, setRemotes] = useState<Array<{ type: string; url: string }>>([])
+  const [remotes, setRemotes] = useState<Array<{ type: RemoteTransportType; url: string }>>([])
 
   const resetForm = () => {
     setSchema("2025-10-17")
@@ -143,16 +145,20 @@ export function AddServerDialog({ open, onOpenChange, onServerAdded }: AddServer
   }
 
   const addRemote = () => {
-    setRemotes([...remotes, { type: "sse", url: "" }])
+    setRemotes([...remotes, { type: "streamable-http", url: "" }])
   }
 
   const removeRemote = (index: number) => {
     setRemotes(remotes.filter((_, i) => i !== index))
   }
 
-  const updateRemote = (index: number, field: string, value: string) => {
+  const updateRemote = (index: number, field: "type" | "url", value: string) => {
     const updated = [...remotes]
-    updated[index] = { ...updated[index], [field]: value }
+    if (field === "type") {
+      updated[index] = { ...updated[index], type: value as RemoteTransportType }
+    } else {
+      updated[index] = { ...updated[index], url: value }
+    }
     setRemotes(updated)
   }
 
@@ -354,15 +360,19 @@ export function AddServerDialog({ open, onOpenChange, onServerAdded }: AddServer
 
             {remotes.map((remote, index) => (
               <div key={index} className="flex gap-2 items-start">
-                <Input
-                  placeholder="Type (e.g., sse, stdio)"
+                <select
+                  id={`remote-transport-${index}`}
                   value={remote.type}
                   onChange={(e) => updateRemote(index, "type", e.target.value)}
+                  className="h-9 min-w-[11rem] rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
                   disabled={loading}
-                  className="w-40"
-                />
+                  aria-label="Remote transport"
+                >
+                  <option value="streamable-http">streamable-http</option>
+                  <option value="sse">sse</option>
+                </select>
                 <Input
-                  placeholder="URL (optional)"
+                  placeholder="URL *"
                   value={remote.url}
                   onChange={(e) => updateRemote(index, "url", e.target.value)}
                   disabled={loading}
