@@ -119,7 +119,11 @@ func runDeployAgentgateway(cmd *cobra.Command, args []string) error {
 	}
 
 	safeName := k8s.SanitizeName(serverName)
-	exposedPath := fmt.Sprintf("/%s/mcp", safeName)
+	pathSuffix := k8s.DeriveMCPPathSuffix(serverName)
+	if pathSuffix == "" {
+		return fmt.Errorf("server name must contain '/' (e.g. namespace/name)")
+	}
+	exposedPath := fmt.Sprintf("/%s/mcp", pathSuffix)
 
 	applyReq := k8s.ApplyRequest{
 		Name:             safeName,

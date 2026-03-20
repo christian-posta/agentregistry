@@ -356,6 +356,7 @@ func buildBackend(req ApplyRequest, host string, port int32, urlPath string) *un
 			"port":     int64(port),
 			"path":     urlPath,
 			"protocol": req.Protocol,
+			"policies": map[string]interface{}{"tls": map[string]interface{}{}},
 		},
 	}
 	obj.Object["spec"] = map[string]interface{}{
@@ -497,7 +498,7 @@ func buildSSOPolicy(req ApplyRequest, sso SSOConfig) *unstructured.Unstructured 
 			"tls": map[string]interface{}{},
 			"mcp": map[string]interface{}{
 				"authentication": map[string]interface{}{
-					"mode":      "Optional",
+					"mode":      "Strict",
 					"issuer":    sso.Issuer,
 					"audiences": []interface{}{sso.Audience},
 					"jwks": map[string]interface{}{

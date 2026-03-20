@@ -19,6 +19,16 @@ export function sanitizeName(name: string): string {
   return n
 }
 
+/** Mirrors k8s.DeriveMCPPathSuffix in internal/k8s/agentgateway.go */
+export function deriveMCPPathSuffix(serverName: string): string {
+  const idx = serverName.indexOf('/')
+  if (idx < 0) return ''
+  let suffix = serverName.slice(idx + 1).trim()
+  if (!suffix) return ''
+  suffix = suffix.toLowerCase().replace(/[^a-z0-9\-_]+/g, '-').replace(/^-+|-+$/g, '')
+  return suffix
+}
+
 /** Mirrors parseRemoteURL in internal/k8s/agentgateway.go */
 export function parseRemoteURL(rawURL: string): { host: string; port: number; path: string } {
   const u = new URL(rawURL)
@@ -38,6 +48,8 @@ function defaultMCPPath(protocol: 'StreamableHTTP' | 'SSE'): string {
 export function generateManifests(params: GenerateManifestsParams): string {
   const { serverName, gwName, gwNamespace, namespace, url, protocol } = params
   const name = sanitizeName(serverName)
+  const pathSuffix = deriveMCPPathSuffix(serverName)
+  if (!pathSuffix) throw new Error("server name must contain '/' (e.g. namespace/name)")
   let parsed: { host: string; port: number; path: string }
   try {
     parsed = parseRemoteURL(url)
@@ -47,7 +59,7 @@ export function generateManifests(params: GenerateManifestsParams): string {
   const urlPath = parsed.path || defaultMCPPath(protocol)
 
   const backendYAML = renderBackend({ name, namespace, host: parsed.host, port: parsed.port, urlPath, protocol })
-  const routeYAML = renderHTTPRoute({ name, namespace, gwName, gwNamespace, path: `/${name}/mcp` })
+  const routeYAML = renderHTTPRoute({ name, namespace, gwName, gwNamespace, path: `/${pathSuffix}/mcp` })
 
   return '---\n' + backendYAML + '---\n' + routeYAML
 }
