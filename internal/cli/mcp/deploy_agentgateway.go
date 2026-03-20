@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/agentregistry-dev/agentregistry/internal/k8s"
@@ -13,18 +14,27 @@ import (
 
 const defaultGatewayNamespace = "agentgateway-system"
 
+const (
+	envSSOIssuer        = "AGENTGATEWAY_SSO_ISSUER"
+	envSSOAudience      = "AGENTGATEWAY_SSO_AUDIENCE"
+	envSSOProvider      = "AGENTGATEWAY_SSO_PROVIDER"
+	envSSOPublicBaseURL = "AGENTGATEWAY_SSO_PUBLIC_BASE_URL"
+	envSSOJWKSURL       = "AGENTGATEWAY_SSO_JWKS_URL"
+)
+
 var (
-	agentgatewayGateway         string
-	agentgatewayGatewayNs       string
-	agentgatewayResourceNs      string
-	agentgatewayKubeconfig      string
-	agentgatewayDryRun          bool
-	agentgatewayVersion         string
-	agentgatewayDeployName      string
-	agentgatewayDeployURL       string
-	agentgatewayDeployProtocol  string
-	listGatewaysNamespace       string
-	listGatewaysKubeconfig      string
+	agentgatewayGateway        string
+	agentgatewayGatewayNs      string
+	agentgatewayResourceNs     string
+	agentgatewayKubeconfig     string
+	agentgatewayDryRun         bool
+	agentgatewaySSO            bool
+	agentgatewayVersion        string
+	agentgatewayDeployName     string
+	agentgatewayDeployURL      string
+	agentgatewayDeployProtocol string
+	listGatewaysNamespace      string
+	listGatewaysKubeconfig     string
 )
 
 var DeployAgentgatewayCmd = &cobra.Command{
@@ -54,6 +64,7 @@ func init() {
 	DeployAgentgatewayCmd.Flags().StringVar(&agentgatewayResourceNs, "resource-namespace", "", "Namespace for AgentgatewayBackend and HTTPRoute (defaults to gateway-namespace)")
 	DeployAgentgatewayCmd.Flags().StringVar(&agentgatewayKubeconfig, "kubeconfig", "", "Path to kubeconfig (default: KUBECONFIG env var or ~/.kube/config)")
 	DeployAgentgatewayCmd.Flags().BoolVar(&agentgatewayDryRun, "dry-run", false, "Print manifests to stdout instead of applying to the cluster")
+	DeployAgentgatewayCmd.Flags().BoolVar(&agentgatewaySSO, "sso", false, "Generate SSO-enabled resources (OAuth/OIDC); requires AGENTGATEWAY_SSO_* env vars")
 	DeployAgentgatewayCmd.Flags().StringVar(&agentgatewayVersion, "version", "latest", "Server version (when resolving by name from registry)")
 	DeployAgentgatewayCmd.Flags().StringVar(&agentgatewayDeployName, "name", "", "Server name (use with --url when not resolving from registry)")
 	DeployAgentgatewayCmd.Flags().StringVar(&agentgatewayDeployURL, "url", "", "Remote URL of the MCP server (use with --name when not resolving from registry)")
@@ -118,6 +129,61 @@ func runDeployAgentgateway(cmd *cobra.Command, args []string) error {
 		RemoteURL:        remoteURL,
 		Protocol:         protocolCRD,
 		Path:             exposedPath,
+	}
+
+	if agentgatewaySSO {
+		issuer := os.Getenv(envSSOIssuer)
+		audience := os.Getenv(envSSOAudience)
+		provider := os.Getenv(envSSOProvider)
+		publicBaseURL := os.Getenv(envSSOPublicBaseURL)
+		jwksURL := os.Getenv(envSSOJWKSURL)
+		for _, pair := range []struct{ name, val string }{
+			{envSSOIssuer, issuer},
+			{envSSOAudience, audience},
+			{envSSOProvider, provider},
+			{envSSOPublicBaseURL, publicBaseURL},
+			{envSSOJWKSURL, jwksURL},
+		} {
+			if strings.TrimSpace(pair.val) == "" {
+				return fmt.Errorf("--sso requires %s to be set", pair.name)
+			}
+		}
+		sso, err := k8s.BuildSSOConfig(issuer, audience, provider, publicBaseURL, jwksURL, serverName)
+		if err != nil {
+			return fmt.Errorf("invalid SSO config: %w", err)
+		}
+		if agentgatewayDryRun {
+			manifests, err := k8s.RenderSSOManifests(applyReq, sso)
+			if err != nil {
+				return fmt.Errorf("failed to render SSO manifests: %w", err)
+			}
+			fmt.Print(manifests)
+			return nil
+		}
+		c, err := k8s.NewClient(agentgatewayKubeconfig)
+		if err != nil {
+			return fmt.Errorf("failed to connect to cluster: %w", err)
+		}
+		gateways, err := k8s.ListGateways(context.Background(), c, agentgatewayGatewayNs)
+		if err != nil {
+			return fmt.Errorf("failed to query cluster for Gateway: %w", err)
+		}
+		found := false
+		for _, gw := range gateways {
+			if gw.Name == agentgatewayGateway && gw.Namespace == agentgatewayGatewayNs {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("gateway %q not found in namespace %q", agentgatewayGateway, agentgatewayGatewayNs)
+		}
+		if err := k8s.ApplySSOResources(context.Background(), c, applyReq, sso); err != nil {
+			return fmt.Errorf("failed to apply SSO resources: %w", err)
+		}
+		ssoPath := "/" + sso.MCPPathSuffix + "/mcp"
+		printer.PrintSuccess(fmt.Sprintf("Deployed SSO AgentGateway config for %s at %s via gateway %s", serverName, ssoPath, agentgatewayGateway))
+		return nil
 	}
 
 	if agentgatewayDryRun {

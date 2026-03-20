@@ -206,3 +206,165 @@ func TestDeleteMCPBackend_NotFound(t *testing.T) {
 	err := DeleteMCPBackend(ctx, c, "nonexistent", "default")
 	require.NoError(t, err)
 }
+
+func TestDeriveMCPPathSuffix(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"dev.servereverything/server", "server"},
+		{"user/my-server", "my-server"},
+		{"io.example.com/weather-api", "weather-api"},
+		{"ns/Name_With_Stuff", "name_with_stuff"},
+	}
+	for _, tc := range cases {
+		got := DeriveMCPPathSuffix(tc.input)
+		assert.Equal(t, tc.want, got, "input: %q", tc.input)
+	}
+}
+
+func TestBuildSSOConfig(t *testing.T) {
+	sso, err := BuildSSOConfig(
+		"https://tenant.auth0.com/",
+		"https://example.com/mcp",
+		"Auth0",
+		"https://my-gw.ngrok.io",
+		"https://tenant.auth0.com/.well-known/jwks.json",
+		"dev.servereverything/server",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "https://tenant.auth0.com/", sso.Issuer)
+	assert.Equal(t, "https://example.com/mcp", sso.Audience)
+	assert.Equal(t, "Auth0", sso.Provider)
+	assert.Equal(t, "https://my-gw.ngrok.io", sso.PublicBaseURL)
+	assert.Equal(t, "server", sso.MCPPathSuffix)
+	assert.Equal(t, "tenant.auth0.com", sso.JWKSHost)
+	assert.Equal(t, int32(443), sso.JWKSPort)
+	assert.Equal(t, ".well-known/jwks.json", sso.JWKSPath)
+	assert.Equal(t, "https://my-gw.ngrok.io/server/mcp", sso.ResourceBaseURL)
+}
+
+func TestBuildSSOConfig_HandlesTrailingSlash(t *testing.T) {
+	sso, err := BuildSSOConfig(
+		"https://tenant.auth0.com/",
+		"https://example.com/mcp",
+		"Auth0",
+		"https://my-gw.ngrok.io/",
+		"https://tenant.auth0.com/.well-known/jwks.json",
+		"dev.servereverything/server",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "https://my-gw.ngrok.io", sso.PublicBaseURL)
+}
+
+func TestBuildSSOConfig_InvalidJWKSURL(t *testing.T) {
+	_, err := BuildSSOConfig(
+		"https://tenant.auth0.com/",
+		"https://example.com/mcp",
+		"Auth0",
+		"https://my-gw.ngrok.io",
+		"://invalid",
+		"dev.servereverything/server",
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid JWKS URL")
+}
+
+func TestRenderSSOManifests(t *testing.T) {
+	req := ApplyRequest{
+		Name:             "dev-servereverything-server",
+		Namespace:        "agentgateway-system",
+		GatewayName:      "agentgateway",
+		GatewayNamespace: "agentgateway-system",
+		RemoteURL:        "https://mcp.example.com/mcp",
+		Protocol:         "StreamableHTTP",
+		Path:             "/server/mcp",
+	}
+	sso := SSOConfig{
+		Issuer:          "https://tenant.auth0.com/",
+		Audience:        "https://example.com/mcp",
+		Provider:        "Auth0",
+		PublicBaseURL:   "https://my-gw.ngrok.io",
+		JWKSURL:         "https://tenant.auth0.com/.well-known/jwks.json",
+		MCPPathSuffix:   "server",
+		JWKSHost:        "tenant.auth0.com",
+		JWKSPort:        443,
+		JWKSPath:        ".well-known/jwks.json",
+		ResourceBaseURL: "https://my-gw.ngrok.io/server/mcp",
+	}
+
+	yaml, err := RenderSSOManifests(req, sso)
+	require.NoError(t, err)
+
+	docs := strings.Split(strings.TrimSuffix(yaml, "\n"), "\n---\n")
+	require.Len(t, docs, 4, "expected 4 YAML documents")
+
+	// Document 1: HTTPRoute
+	assert.Contains(t, docs[0], "kind: HTTPRoute")
+	assert.Contains(t, docs[0], "name: dev-servereverything-server")
+	assert.Contains(t, docs[0], "value: /server/mcp")
+	assert.Contains(t, docs[0], "/.well-known/oauth-protected-resource/server/mcp")
+	assert.Contains(t, docs[0], "/.well-known/oauth-authorization-server/server/mcp")
+
+	// Document 2: MCP AgentgatewayBackend with TLS
+	assert.Contains(t, docs[1], "kind: AgentgatewayBackend")
+	assert.Contains(t, docs[1], "name: dev-servereverything-server")
+	assert.Contains(t, docs[1], "policies:")
+	assert.Contains(t, docs[1], "tls:")
+
+	// Document 3: JWKS AgentgatewayBackend
+	assert.Contains(t, docs[2], "kind: AgentgatewayBackend")
+	assert.Contains(t, docs[2], "name: dev-servereverything-server-jwks")
+	assert.Contains(t, docs[2], "tenant.auth0.com")
+
+	// Document 4: EnterpriseAgentgatewayPolicy
+	assert.Contains(t, docs[3], "kind: EnterpriseAgentgatewayPolicy")
+	assert.Contains(t, docs[3], "name: dev-servereverything-server-policy")
+	assert.Contains(t, docs[3], "issuer: https://tenant.auth0.com/")
+	assert.Contains(t, docs[3], "dev-servereverything-server-jwks")
+}
+
+func TestApplySSOResources(t *testing.T) {
+	ctx := context.Background()
+	c := newFakeClient()
+
+	req := ApplyRequest{
+		Name:             "dev-servereverything-server",
+		Namespace:        "agentgateway-system",
+		GatewayName:      "agentgateway",
+		GatewayNamespace: "agentgateway-system",
+		RemoteURL:        "https://mcp.example.com/mcp",
+		Protocol:         "StreamableHTTP",
+		Path:             "/server/mcp",
+	}
+	sso := SSOConfig{
+		Issuer:          "https://tenant.auth0.com/",
+		Audience:        "https://example.com/mcp",
+		Provider:        "Auth0",
+		PublicBaseURL:   "https://my-gw.ngrok.io",
+		JWKSURL:         "https://tenant.auth0.com/.well-known/jwks.json",
+		MCPPathSuffix:   "server",
+		JWKSHost:        "tenant.auth0.com",
+		JWKSPort:        443,
+		JWKSPath:        ".well-known/jwks.json",
+		ResourceBaseURL: "https://my-gw.ngrok.io/server/mcp",
+	}
+
+	err := ApplySSOResources(ctx, c, req, sso)
+	require.NoError(t, err)
+
+	// Verify MCP backend has TLS in target static
+	backend := &unstructured.Unstructured{}
+	backend.SetGroupVersionKind(backendGVK)
+	err = c.Get(ctx, client.ObjectKey{Name: req.Name, Namespace: req.Namespace}, backend)
+	require.NoError(t, err)
+	spec := backend.Object["spec"].(map[string]interface{})
+	mcpSpec := spec["mcp"].(map[string]interface{})
+	targets := mcpSpec["targets"].([]interface{})
+	require.Len(t, targets, 1)
+	static := targets[0].(map[string]interface{})["static"].(map[string]interface{})
+	policies, ok := static["policies"].(map[string]interface{})
+	require.True(t, ok)
+	_, hasTLS := policies["tls"]
+	assert.True(t, hasTLS, "MCP backend target must have policies.tls")
+}
